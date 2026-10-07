@@ -18,13 +18,7 @@ if errorlevel 1 (
 )
 
 echo Sestavuji StitkyTisk.exe ...
-python -m PyInstaller --noconfirm --clean ^
-  --onefile --windowed ^
-  --name StitkyTisk ^
-  --hidden-import win32print ^
-  --hidden-import win32api ^
-  --hidden-import win32timezone ^
-  main.py
+python -m PyInstaller --noconfirm --clean StitkyTisk.spec
 
 if errorlevel 1 (
   echo Build selhal.
