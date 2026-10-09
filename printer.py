@@ -57,13 +57,25 @@ def print_bitmap(
     *,
     page_width_mm: float = 215.0,
     page_height_mm: float = 304.0,
+    scale_x: float | None = None,
+    scale_y: float | None = None,
 ) -> None:
     """
     Odešle PIL Image přímo na tiskárnu přes Windows GDI (bez PDF).
     Na jiných platformách uloží PNG a použije lpr (fallback).
+    scale_x/scale_y = korekce měřítka (None = výchozí z layout.py).
     """
     if sys.platform == "win32":
-        _print_bitmap_windows(image, printer_name, page_width_mm, page_height_mm)
+        from layout import PRINT_SCALE_X, PRINT_SCALE_Y
+
+        _print_bitmap_windows(
+            image,
+            printer_name,
+            page_width_mm,
+            page_height_mm,
+            PRINT_SCALE_X if scale_x is None else float(scale_x),
+            PRINT_SCALE_Y if scale_y is None else float(scale_y),
+        )
         return
 
     # Fallback mimo Windows: dočasný PNG + lpr
@@ -166,20 +178,20 @@ def _print_bitmap_windows(
     printer_name: str | None,
     page_width_mm: float,
     page_height_mm: float,
+    scale_x: float,
+    scale_y: float,
 ) -> None:
     import win32con  # type: ignore
     import win32print  # type: ignore
     import win32ui  # type: ignore
     from PIL import ImageWin
 
-    from layout import PRINT_SCALE_X, PRINT_SCALE_Y
-
     name = printer_name or win32print.GetDefaultPrinter()
     if not name:
         raise RuntimeError("Není dostupná žádná tiskárna.")
 
     # Scale v bitmapě; na tiskárnu jde stránka 1:1 (mm → device px).
-    image = _bake_print_scale(image, PRINT_SCALE_X, PRINT_SCALE_Y)
+    image = _bake_print_scale(image, scale_x, scale_y)
 
     devmode = None
     try:

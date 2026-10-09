@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-ROWS = "ABCDEFGH"  # max. 8 řádků (A–H)
+ROWS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"  # max. 26 řádků (A–Z)
 COLS = 3  # výchozí počet sloupců (preset 3×8)
 
 # Nepotisknutelný okraj tiskárny (informativní / náhledové rámečky).
@@ -181,6 +181,17 @@ class SheetLayout:
 
     rotate_print_180: bool = False
 
+    # Explicitní mřížka (verze 2.0 — definice archu). None = staré chování
+    # (symetrické okraje z outer_margin_*).
+    margin_left_mm: float | None = None
+    margin_top_mm: float | None = None
+    gap_x_fixed_mm: float | None = None
+    gap_y_fixed_mm: float | None = None
+
+    # Korekce měřítka při GDI tisku (1.0 = beze změny).
+    print_scale_x: float = PRINT_SCALE_X
+    print_scale_y: float = PRINT_SCALE_Y
+
     def print_offset_mm(self) -> tuple[float, float]:
         """
         Posun tiskové stránky vůči fyzickému archu — vždy vystředěno.
@@ -209,6 +220,8 @@ class SheetLayout:
         return ox, oy
 
     def gap_x_mm(self) -> float:
+        if self.gap_x_fixed_mm is not None:
+            return float(self.gap_x_fixed_mm)
         ox, _ = self.resolved_outer_margins()
         denom = self.cols - 1
         if denom <= 0:
@@ -216,6 +229,8 @@ class SheetLayout:
         return (self.page_width_mm - 2 * ox - self.cols * self.label_width_mm) / denom
 
     def gap_y_mm(self) -> float:
+        if self.gap_y_fixed_mm is not None:
+            return float(self.gap_y_fixed_mm)
         _, oy = self.resolved_outer_margins()
         denom = self.rows - 1
         if denom <= 0:
@@ -229,7 +244,24 @@ class SheetLayout:
         return self.rows * self.label_height_mm + (self.rows - 1) * self.gap_y_mm()
 
     def resolved_margins(self) -> tuple[float, float]:
-        return self.resolved_outer_margins()
+        """Levý a horní okraj mřížky od kraje fyzického archu."""
+        ox, oy = self.resolved_outer_margins()
+        if self.margin_left_mm is not None:
+            ox = float(self.margin_left_mm)
+        elif self.gap_x_fixed_mm is not None:
+            ox = (self.page_width_mm - self.content_width_mm()) / 2.0
+        if self.margin_top_mm is not None:
+            oy = float(self.margin_top_mm)
+        elif self.gap_y_fixed_mm is not None:
+            oy = (self.page_height_mm - self.content_height_mm()) / 2.0
+        return ox, oy
+
+    def margins_lrtb_mm(self) -> tuple[float, float, float, float]:
+        """Okraje mřížky od kraje archu: (vlevo, vpravo, nahoře, dole)."""
+        left, top = self.resolved_margins()
+        right = self.page_width_mm - left - self.content_width_mm()
+        bottom = self.page_height_mm - top - self.content_height_mm()
+        return left, right, top, bottom
 
     def printable_rect_physical_mm(self) -> tuple[float, float, float, float]:
         """
@@ -434,6 +466,13 @@ class SheetLayout:
             if gx < -2.0 or gy < -2.0 or not blocking_only:
                 warnings.append(msg)
 
+        ml, mr, mt, mb = self.margins_lrtb_mm()
+        if min(ml, mr, mt, mb) < -0.05:
+            warnings.append(
+                f"Mřížka přesahuje arch (okraje L/P/H/D "
+                f"{ml:.2f}/{mr:.2f}/{mt:.2f}/{mb:.2f} mm)."
+            )
+
         if blocking_only:
             return warnings
 
@@ -470,25 +509,25 @@ class SheetLayout:
         return warnings
 
     def summary_text(self) -> str:
-        ox, oy = self.resolved_outer_margins()
         gx, gy = self.gap_x_mm(), self.gap_y_mm()
+        ml, mr, mt, mb = self.margins_lrtb_mm()
         off_x, off_y = self.print_offset_mm()
         span_x = self.pitch_x_mm() * max(self.cols - 1, 0)
         span_y = self.pitch_y_mm() * max(self.rows - 1, 0)
         last_col = self.cols
         last_row = ROWS[self.rows - 1] if 0 < self.rows <= len(ROWS) else "?"
         return (
-            f"Fyzický arch: {self.page_width_mm:.0f}×{self.page_height_mm:.0f} mm "
-            f"(štítky {self.label_width_mm:.0f}×{self.label_height_mm:.0f}, "
+            f"Fyzický arch: {self.page_width_mm:g}×{self.page_height_mm:g} mm "
+            f"(štítky {self.label_width_mm:g}×{self.label_height_mm:g}, "
             f"mřížka {self.cols}×{self.rows})\n"
-            f"Tisková stránka: {self.print_width_mm:.0f}×{self.print_height_mm:.0f} mm "
+            f"Tisková stránka: {self.print_width_mm:g}×{self.print_height_mm:g} mm "
             f"(offset {off_x:.2f}/{off_y:.2f} mm; "
             f"vpravo ořez {self.page_width_mm - self.print_width_mm - off_x:.2f} mm)\n"
             f"Rozteč středů (hlavní): A1→A{last_col}={span_x:.1f}, "
             f"A1→{last_row}1={span_y:.1f} mm "
             f"(pitch {self.pitch_x_mm():.2f}/{self.pitch_y_mm():.2f})\n"
             f"Mezery mezi štítky (= pitch − štítek): {gx:.2f} / {gy:.2f} mm\n"
-            f"Okraje archu (vystředění): {ox:.2f} / {oy:.2f} mm\n"
+            f"Okraje archu L/P/H/D: {ml:.2f} / {mr:.2f} / {mt:.2f} / {mb:.2f} mm\n"
             f"Padding obsahu T R B L: "
             f"{self.content_pad_top_mm:.1f} {self.content_pad_right_mm:.1f} "
             f"{self.content_pad_bottom_mm:.1f} {self.content_pad_left_mm:.1f} mm\n"

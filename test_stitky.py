@@ -309,7 +309,167 @@ class RenderTests(unittest.TestCase):
             self.assertGreater(img.width, 100)
 
 
+class SheetDefinitionTests(unittest.TestCase):
+    def test_builtin_2x8_matches_measurement(self) -> None:
+        from sheets import builtin_by_id
+
+        lay = builtin_by_id("2x8_120x36").to_layout()
+        ml, mr, mt, mb = lay.margins_lrtb_mm()
+        self.assertAlmostEqual(ml, 2.0, places=3)
+        self.assertAlmostEqual(mr, 2.0, places=3)
+        self.assertAlmostEqual(mt, 2.0, places=3)
+        self.assertAlmostEqual(mb, 2.0, places=3)
+        self.assertAlmostEqual(lay.gap_x_mm(), 3.0, places=3)
+        self.assertAlmostEqual(lay.pitch_y_mm() * 7, 263.5, places=3)
+        self.assertAlmostEqual(lay.print_width_mm, 211.0)
+
+    def test_builtin_3x8_same_as_v1(self) -> None:
+        from layout import layout_from_preset
+        from sheets import builtin_by_id
+
+        old = layout_from_preset("3x8_70x36")
+        new = builtin_by_id("3x8_70x36").to_layout()
+        for r, c in ((0, 0), (3, 1), (7, 2)):
+            for a, b in zip(old.label_rect_print_mm(r, c), new.label_rect_print_mm(r, c)):
+                self.assertAlmostEqual(a, b, places=3)
+
+    def test_axis_modes(self) -> None:
+        from sheets import AXIS_GAP, AXIS_INTERPOLATE, AXIS_PITCH, AxisSpec
+
+        # interpolace: 300 − 5 − 7 − 8×36 = 0 → mezera 0
+        start, gap = AxisSpec(AXIS_INTERPOLATE, 5, 7).resolve(300, 36, 8)
+        self.assertAlmostEqual(start, 5)
+        self.assertAlmostEqual(gap, 0)
+        # pevná mezera, vystředěno: 2×100 + 4 = 204 → okraj 3,5
+        start, gap = AxisSpec(AXIS_GAP, gap_mm=4, center=True).resolve(211, 100, 2)
+        self.assertAlmostEqual(start, 3.5)
+        self.assertAlmostEqual(gap, 4)
+        # pevná mezera od okraje
+        start, gap = AxisSpec(AXIS_GAP, margin_start_mm=1, gap_mm=4, center=False).resolve(
+            211, 100, 2
+        )
+        self.assertAlmostEqual(start, 1)
+        # pevná rozteč
+        start, gap = AxisSpec(AXIS_PITCH, pitch_mm=38, center=True).resolve(304, 36, 8)
+        self.assertAlmostEqual(gap, 2)
+        self.assertAlmostEqual(start, 1)
+        # jeden štítek
+        start, gap = AxisSpec(AXIS_GAP, gap_mm=4, center=True).resolve(100, 60, 1)
+        self.assertAlmostEqual(start, 20)
+        self.assertAlmostEqual(gap, 0)
+
+    def test_asymmetric_margins_layout(self) -> None:
+        from sheets import AXIS_INTERPOLATE, AxisSpec, SheetDefinition
+
+        s = SheetDefinition(
+            id="t", name="t", page_width_mm=210, page_height_mm=297,
+            label_width_mm=100, label_height_mm=30, cols=2, rows=9,
+            x=AxisSpec(AXIS_INTERPOLATE, 3, 1), y=AxisSpec(AXIS_INTERPOLATE, 6, 3),
+            print_scale_x_pct=100, print_scale_y_pct=100,
+        )
+        lay = s.to_layout()
+        ml, mr, mt, mb = lay.margins_lrtb_mm()
+        self.assertAlmostEqual((ml, mr), (3, 1))
+        self.assertAlmostEqual(mt, 6)
+        self.assertAlmostEqual(mb, 3)
+        self.assertAlmostEqual(lay.gap_x_mm(), 6)
+        self.assertEqual(lay.print_scale_x, 1.0)
+        self.assertEqual(lay.label_rect_mm(8, 1)[1] + 30, 297 - 3)
+
+    def test_store_roundtrip(self) -> None:
+        from sheets import SheetStore, builtin_by_id
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sheets.json"
+            store = SheetStore(path)
+            b = store.get("2x8_120x36").copy(page_height_mm=300.0)
+            store.upsert(b)
+            custom = b.copy(id="arch_1", name="Můj arch", builtin=False, cols=1)
+            store.upsert(custom)
+            store.save()
+
+            again = SheetStore(path)
+            self.assertAlmostEqual(again.get("2x8_120x36").page_height_mm, 300.0)
+            self.assertTrue(again.get("2x8_120x36").builtin)
+            self.assertEqual(again.get("arch_1").name, "Můj arch")
+            self.assertEqual(again.get("arch_1").cols, 1)
+            # neupravený vestavěný arch se do souboru neukládá
+            again.upsert(builtin_by_id("2x8_120x36"))
+            again.save()
+            self.assertNotIn('"2x8_120x36"', path.read_text(encoding="utf-8"))
+            # neznámé id → výchozí arch
+            self.assertEqual(again.get("neexistuje").id, "3x8_70x36")
+
+    def test_dialog_smoke(self) -> None:
+        import tkinter as tk
+
+        from sheet_dialog import SheetManagerDialog
+        from sheets import AXIS_GAP, SheetStore
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            store = SheetStore(None)
+            dlg = SheetManagerDialog(root, store, "2x8_120x36")
+            dlg.withdraw()
+            # interpolace → mezera dopočtena do needitovatelného pole
+            self.assertEqual(dlg.axis_x.var_gap.get(), "3")
+            dlg.axis_x.var_mode.set(AXIS_GAP)
+            dlg._on_change()
+            dlg.axis_x.var_gap.set("5")
+            self.assertEqual(dlg.axis_x.var_start.get(), "1")  # (211 − 209) / 2
+            dlg._new()
+            self.assertEqual(len(dlg.work), 3)
+            dlg.var_name.set("Test arch")
+            dlg._save_and_use()
+            self.assertEqual(store.get(dlg.result_id).name, "Test arch")
+            self.assertAlmostEqual(store.get("2x8_120x36").x.gap_mm, 5.0)
+        finally:
+            root.destroy()
+
+
+class SheetPreviewTests(unittest.TestCase):
+    def test_preview_click_and_toggle(self) -> None:
+        from main import LabelApp
+
+        app = LabelApp()
+        app.withdraw()
+        try:
+            app.update()
+            app.sheet_preview.render_now()
+            self.assertIn((0, 0), app.sheet_preview._contents)
+            x0, y0, x1, y1 = app.sheet_preview._cell_box((1, 1))
+            event = type("E", (), {"x": (x0 + x1) / 2, "y": (y0 + y1) / 2})()
+            app.sheet_preview._on_left(event)
+            self.assertEqual(app.active_cell, (1, 1))
+            self.assertFalse(app.cell_vars[(1, 1)].get())
+            app.sheet_preview._on_right(event)
+            self.assertTrue(app.cell_vars[(1, 1)].get())
+            self.assertIn("B2", app.var_positions.get())
+            self.assertIn((1, 1), app.sheet_preview._selected)
+        finally:
+            app.destroy()
+
+
 class DocumentTests(unittest.TestCase):
+    def test_sheet_definition_embedded(self) -> None:
+        from main import LabelApp
+
+        app = LabelApp()
+        app.withdraw()
+        try:
+            state = app._export_state()
+            self.assertEqual(state["sheet_definition"]["id"], state["sheet_preset"])
+            foreign = dict(state["sheet_definition"], id="cizi_arch", name="Cizí", cols=1)
+            state["sheet_preset"] = "cizi_arch"
+            state["sheet_definition"] = foreign
+            state["positions"] = "A1"
+            app._apply_state(state)
+            self.assertEqual(app._current_preset().id, "cizi_arch")
+            self.assertEqual(app._layout().cols, 1)
+        finally:
+            app.destroy()
+
     def test_export_apply_roundtrip(self) -> None:
         from main import LabelApp
 

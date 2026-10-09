@@ -458,6 +458,10 @@ def _scale_drawing_to_fit(drawing, max_w: float, max_h: float):
     return drawing.width, drawing.height
 
 
+_SVG_RASTER_CACHE: dict[tuple, object] = {}
+_SVG_RASTER_CACHE_MAX = 64
+
+
 def open_label_image(path: str | Path, *, max_px: int | None = None):
     """
     Načte rastr nebo SVG jako PIL RGBA.
@@ -469,10 +473,22 @@ def open_label_image(path: str | Path, *, max_px: int | None = None):
     if _is_svg_path(path):
         from reportlab.graphics import renderPM
 
+        px = int(max_px) if max_px else 0
+        try:
+            key = (str(path.resolve()), path.stat().st_mtime_ns, px)
+        except OSError:
+            key = None
+        if key is not None and key in _SVG_RASTER_CACHE:
+            return _SVG_RASTER_CACHE[key].copy()
         drawing = _load_svg_drawing(path)
-        if max_px is not None and max_px > 0:
-            _scale_drawing_to_fit(drawing, float(max_px), float(max_px))
-        return renderPM.drawToPIL(drawing).convert("RGBA")
+        if px > 0:
+            _scale_drawing_to_fit(drawing, float(px), float(px))
+        im = renderPM.drawToPIL(drawing).convert("RGBA")
+        if key is not None:
+            if len(_SVG_RASTER_CACHE) >= _SVG_RASTER_CACHE_MAX:
+                _SVG_RASTER_CACHE.pop(next(iter(_SVG_RASTER_CACHE)))
+            _SVG_RASTER_CACHE[key] = im.copy()
+        return im
 
     im = PILImage.open(path).convert("RGBA")
     if max_px is not None and max_px > 0:
@@ -559,7 +575,7 @@ def render_calibration_pdf(
     span_y = layout.pitch_y_mm() * max(layout.rows - 1, 0)
     last_col = layout.cols
     last_row = cell_name(layout.rows - 1, 0)[0] if layout.rows else "?"
-    ox, oy = layout.resolved_outer_margins()
+    ml, mr, mt, mb = layout.margins_lrtb_mm()
     # Text dole — nahoře by překrýval A1 při malých okrajích
     c.setFillColorRGB(*red)
     c.setFont(font, 7.5)
@@ -575,7 +591,7 @@ def render_calibration_pdf(
         4,
         f"Středy A1→A{last_col}={span_x:.1f} A1→{last_row}1={span_y:.1f} | "
         f"mezery {layout.gap_x_mm():.2f}/{layout.gap_y_mm():.2f} | "
-        f"okraje archu {ox:.1f}/{oy:.1f}",
+        f"okraje L/P/H/D {ml:.1f}/{mr:.1f}/{mt:.1f}/{mb:.1f}",
     )
 
     for r in range(layout.rows):
@@ -785,12 +801,12 @@ def render_sheet_image(
         span_y = layout.pitch_y_mm() * max(layout.rows - 1, 0)
         last_col = layout.cols
         last_row = cell_name(layout.rows - 1, 0)[0] if layout.rows else "?"
-        ox, oy = layout.resolved_outer_margins()
+        ml, mr, mt, mb = layout.margins_lrtb_mm()
         draw.text(
             (8, 6 + int(_pt_to_px(10, dpi))),
             f"Středy A1→A{last_col}={span_x:.1f} A1→{last_row}1={span_y:.1f} | "
             f"mezery {layout.gap_x_mm():.2f}/{layout.gap_y_mm():.2f} | "
-            f"okraje {ox:.1f}/{oy:.1f} (vystředěno)",
+            f"okraje L/P/H/D {ml:.1f}/{mr:.1f}/{mt:.1f}/{mb:.1f}",
             fill=red,
             font=header,
         )
